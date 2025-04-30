@@ -7,6 +7,14 @@ import "log"
 // Token messages represent the transfer of tokens from one server to another.
 // Marker messages represent the progress of the snapshot process. The bulk of
 // the distributed protocol is implemented in `HandlePacket` and `StartSnapshot`.
+type localSnapshot struct {
+	localTokens            int
+	channelRecords         map[string][]*SnapshotMessage
+	channelMarkersReceived map[string]bool
+	pendingChannelCount    int
+	complete               bool
+}
+
 type Server struct {
 	Id            string
 	Tokens        int
@@ -14,6 +22,9 @@ type Server struct {
 	outboundLinks map[string]*Link // key = link.dest
 	inboundLinks  map[string]*Link // key = link.src
 	// TODO: ADD MORE FIELDS HERE
+
+	// <— add this
+	snapshotRecords map[int]*localSnapshot
 }
 
 // A unidirectional communication channel between two servers
@@ -26,11 +37,12 @@ type Link struct {
 
 func NewServer(id string, tokens int, sim *Simulator) *Server {
 	return &Server{
-		id,
-		tokens,
-		sim,
-		make(map[string]*Link),
-		make(map[string]*Link),
+		Id:              id,
+		Tokens:          tokens,
+		sim:             sim,
+		outboundLinks:   make(map[string]*Link),
+		inboundLinks:    make(map[string]*Link),
+		snapshotRecords: make(map[int]*localSnapshot),
 	}
 }
 
@@ -85,6 +97,54 @@ func (server *Server) SendTokens(numTokens int, dest string) {
 // should notify the simulator by calling `sim.NotifySnapshotComplete`.
 func (server *Server) HandlePacket(src string, message interface{}) {
 	// TODO: IMPLEMENT ME
+	switch msg := message.(type) {
+	case TokenMessage:
+		for _, rec := range server.snapshotRecords {
+			if !rec.channelMarkersReceived[src] && !rec.complete {
+				rec.channelRecords[src] = append(
+					rec.channelRecords[src],
+					&SnapshotMessage{src, server.Id, msg},
+				)
+			}
+
+		}
+		server.Tokens += msg.numTokens
+
+	case MarkerMessage:
+		sid := msg.snapshotId
+		rec, seen := server.snapshotRecords[sid]
+
+		if !seen {
+			rec = &localSnapshot{
+				localTokens:            server.Tokens,
+				channelRecords:         make(map[string][]*SnapshotMessage),
+				channelMarkersReceived: make(map[string]bool),
+				pendingChannelCount:    len(server.inboundLinks),
+			}
+
+			for ch := range server.inboundLinks {
+				rec.channelRecords[ch] = nil
+				rec.channelMarkersReceived[ch] = false
+			}
+
+			server.snapshotRecords[sid] = rec
+			rec.channelMarkersReceived[src] = true
+			rec.pendingChannelCount--
+
+			server.SendToNeighbors(msg)
+		} else {
+			if !rec.channelMarkersReceived[src] {
+				rec.channelMarkersReceived[src] = true
+				rec.pendingChannelCount--
+			}
+		}
+
+		if rec.pendingChannelCount == 0 && !rec.complete {
+			rec.complete = true
+			server.sim.NotifySnapshotComplete(server.Id, sid)
+		}
+
+	}
 }
 
 // Start the chandy-lamport snapshot algorithm on this server.
