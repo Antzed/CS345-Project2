@@ -1,6 +1,9 @@
 package chandy_lamport
 
-import "log"
+import (
+	"log"
+	"sync"
+)
 
 // The main participant of the distributed snapshot protocol.
 // Servers exchange token messages and marker messages among each other.
@@ -25,6 +28,7 @@ type Server struct {
 
 	// <— add this
 	snapshotRecords map[int]*localSnapshot
+	snapshotLock    sync.Mutex
 }
 
 // A unidirectional communication channel between two servers
@@ -97,6 +101,9 @@ func (server *Server) SendTokens(numTokens int, dest string) {
 // should notify the simulator by calling `sim.NotifySnapshotComplete`.
 func (server *Server) HandlePacket(src string, message interface{}) {
 	// TODO: IMPLEMENT ME
+	server.snapshotLock.Lock()
+	defer server.snapshotLock.Unlock()
+
 	switch msg := message.(type) {
 	case TokenMessage:
 		for _, rec := range server.snapshotRecords {
@@ -123,20 +130,16 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 			}
 
 			for ch := range server.inboundLinks {
-				rec.channelRecords[ch] = nil
+				rec.channelRecords[ch] = make([]*SnapshotMessage, 0)
 				rec.channelMarkersReceived[ch] = false
 			}
 
 			server.snapshotRecords[sid] = rec
+			server.SendToNeighbors(msg)
+		}
+		if !rec.channelMarkersReceived[src] {
 			rec.channelMarkersReceived[src] = true
 			rec.pendingChannelCount--
-
-			server.SendToNeighbors(msg)
-		} else {
-			if !rec.channelMarkersReceived[src] {
-				rec.channelMarkersReceived[src] = true
-				rec.pendingChannelCount--
-			}
 		}
 
 		if rec.pendingChannelCount == 0 && !rec.complete {
@@ -151,4 +154,34 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 // This should be called only once per server.
 func (server *Server) StartSnapshot(snapshotId int) {
 	// TODO: IMPLEMENT ME
+	server.snapshotLock.Lock()
+	defer server.snapshotLock.Unlock()
+
+	if _, exist := server.snapshotRecords[snapshotId]; exist {
+		return
+	}
+
+	rec := &localSnapshot{
+		localTokens:            server.Tokens,
+		channelRecords:         make(map[string][]*SnapshotMessage),
+		channelMarkersReceived: make(map[string]bool),
+		pendingChannelCount:    len(server.inboundLinks),
+	}
+
+	for ch := range server.inboundLinks {
+		rec.channelRecords[ch] = make([]*SnapshotMessage, 0)
+		rec.channelMarkersReceived[ch] = false
+	}
+
+	server.snapshotRecords[snapshotId] = rec
+
+	server.sim.logger.RecordEvent(server, StartSnapshot{serverId: server.Id, snapshotId: snapshotId})
+
+	server.SendToNeighbors(MarkerMessage{snapshotId})
+
+	if rec.pendingChannelCount == 0 {
+		rec.complete = true
+		server.sim.NotifySnapshotComplete(server.Id, snapshotId)
+	}
+
 }

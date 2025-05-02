@@ -3,6 +3,7 @@ package chandy_lamport
 import (
 	"log"
 	"math/rand"
+	"sync"
 )
 
 // Max random delay added to packet delivery
@@ -25,6 +26,8 @@ type Simulator struct {
 	servers        map[string]*Server // key = server ID
 	logger         *Logger
 	// TODO: ADD MORE FIELDS HERE
+	snapshotOngoing map[int]map[string]bool
+	snapshotLock    sync.Mutex
 }
 
 func NewSimulator() *Simulator {
@@ -34,6 +37,8 @@ func NewSimulator() *Simulator {
 		0,
 		make(map[string]*Server),
 		NewLogger(),
+		make(map[int]map[string]bool),
+		sync.Mutex{},
 	}
 }
 
@@ -110,6 +115,15 @@ func (sim *Simulator) StartSnapshot(serverId string) {
 	sim.nextSnapshotId++
 	sim.logger.RecordEvent(sim.servers[serverId], StartSnapshot{serverId, snapshotId})
 	// TODO: IMPLEMENT ME
+
+	sim.snapshotLock.Lock()
+
+	sim.snapshotOngoing[snapshotId] = make(map[string]bool)
+	for id := range sim.servers {
+		sim.snapshotOngoing[snapshotId][id] = true
+	}
+	sim.snapshotLock.Unlock()
+	sim.servers[serverId].StartSnapshot(snapshotId)
 }
 
 // Callback for servers to notify the simulator that the snapshot process has
@@ -117,12 +131,47 @@ func (sim *Simulator) StartSnapshot(serverId string) {
 func (sim *Simulator) NotifySnapshotComplete(serverId string, snapshotId int) {
 	sim.logger.RecordEvent(sim.servers[serverId], EndSnapshot{serverId, snapshotId})
 	// TODO: IMPLEMENT ME
+
+	sim.snapshotLock.Lock()
+	delete(sim.snapshotOngoing[snapshotId], serverId)
+	if len(sim.snapshotOngoing[snapshotId]) == 0 {
+		delete(sim.snapshotOngoing, snapshotId)
+	}
+	sim.snapshotLock.Unlock()
 }
 
 // Collect and merge snapshot state from all the servers.
 // This function blocks until the snapshot process has completed on all servers.
 func (sim *Simulator) CollectSnapshot(snapshotId int) *SnapshotState {
 	// TODO: IMPLEMENT ME
-	snap := SnapshotState{snapshotId, make(map[string]int), make([]*SnapshotMessage, 0)}
+
+	for {
+		sim.snapshotLock.Lock()
+		_, ongoing := sim.snapshotOngoing[snapshotId]
+		sim.snapshotLock.Unlock()
+		if !ongoing {
+			break
+		}
+
+	}
+
+	snap := SnapshotState{
+		id:       snapshotId,
+		tokens:   make(map[string]int),
+		messages: make([]*SnapshotMessage, 0),
+	}
+
+	for serverId, server := range sim.servers {
+		server.snapshotLock.Lock()
+		rec := server.snapshotRecords[snapshotId]
+		server.snapshotLock.Unlock()
+
+		snap.tokens[serverId] = rec.localTokens
+		for _, msg := range rec.channelRecords {
+			for _, msg := range msg {
+				snap.messages = append(snap.messages, msg)
+			}
+		}
+	}
 	return &snap
 }
