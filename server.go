@@ -26,7 +26,6 @@ type Server struct {
 	inboundLinks  map[string]*Link // key = link.src
 	// TODO: ADD MORE FIELDS HERE
 
-	// <— add this
 	snapshotRecords map[int]*localSnapshot
 	snapshotLock    sync.Mutex
 }
